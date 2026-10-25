@@ -193,6 +193,33 @@ static struct Token next_token(struct Tokenizer *t) {
     }
 }
 
+//---- Parser ----
+static long long primary(struct Tokenizer *t) {
+    struct Token token = next_token(t);
+    
+    if (token.type == TOKEN_NUMBER) {
+        return token.value;
+    } else {
+        return 0;
+    }
+}
+
+static long long expression(struct Tokenizer *t) {
+    long long solution = primary(t);
+
+    for (;;) {
+        struct Token token = next_token(t);
+        if (token.type == TOKEN_PLUS) {
+            solution += primary(t);
+        } else if (token.type == TOKEN_MINUS) {
+            solution -= primary(t);
+        } else {
+            break;
+        }
+    }
+    return solution;
+}
+
 int main(int argc, char **argv) {
     if (argc != 4 || strcmp(argv[1], "-o") != 0) {
         fprintf(stderr, "Usage: %s -o <output_dir> <input_file>\n", argv[0]);
@@ -219,7 +246,21 @@ int main(int argc, char **argv) {
 
     int yippie = write_file(output_path, buffer, length);
 
+    FILE *out = fopen(output_path, "w");
+    if (out == NULL) {
+        fprintf(stderr, "Failed to open '%s' for writing\n", output_path);
+        free(buffer);
+        free(output_path);
+        return 1;
+    }
+
+    struct Tokenizer t = {buffer, length, 0};
+    while (t.position < t.length) {
+        fprintf(out, "%lld\n", expression(&t));
+    }
+    fclose(out);
+
     free(buffer);
     free(output_path);
-    return yippie;
+    return 0;
 }
