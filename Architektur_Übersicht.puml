@@ -1,0 +1,52 @@
+@startuml calc-architektur
+title calc  Gesamtarchitektur
+
+skinparam componentStyle rectangle
+left to right direction
+
+component "main()\nEinstieg (Phase 0)" as main
+component "CLI\n-d/--dir, -o/--output-dir\nDefault-Output-Ordner, Exit-Codes\n(Phase 9)" as cli
+component "Datei-Handling\nread_whole_file()\nganze Datei -> Heap-Buffer\n(Phase 1)" as files
+component "Zeilen-Schleife\nje Nicht-Leerzeile ein Ergebnis\n'#' = Kommentarzeile\n(Phase 2 + 8)" as lines
+component "Tokenizer\nnext_token()\nToken{type, ival, pos}\npos = Buffer-Index + 1 (Phase 2 + 5)" as tokenizer
+component "Parser / Evaluator\nrecursive descent, berechnet\ndirekt beim Parsen\n(Phase 4 - 8)" as parser
+component "Value\nlong long | double\n(Phase 10)" as value
+component "Output-Naming\nmake_output_path()\nOUTDIR/<base>_<name>_<lastname>_<id>.txt\n(Phase 1 + 9)" as naming
+database "Ausgabedatei\nFehlerfall: NUR ERROR:<pos>\nerster Fehler gewinnt (Phase 3)" as out
+
+main --> cli
+cli --> files
+files --> lines : buffer + length
+lines --> tokenizer
+tokenizer --> parser : Token-Stream (peek / advance)
+parser --> value : Wert je Zeile
+lines --> naming
+naming --> out
+
+package "Grammatik: je Regel eine Funktion" as grammar {
+  component "expr\nterm { ('+' | '-') term }\nlinksassoziativ: While-Schleife\n(Phase 2)" as expr
+  component "term\npower { ('*' | '/') power }\nlinksassoziativ\n(Phase 4)" as term
+  component "power\nprimary [ '**' power ]\nrechtsassoziativ: ruft sich SELBST\n(Phase 6)" as power
+  component "primary\nNUMBER | '(' expr ')'\n(Phase 5)" as primary
+}
+
+parser ..> expr
+expr ..> term : ruft
+term ..> power : ruft
+power ..> primary : ruft
+primary ..> expr : bei '(' zuruck\nin die Klammer (Rekursion!)
+
+note bottom of power
+  2 ** 3 ** 2  ==  2 ** (3 ** 2) == 512
+  Rechtsassoziativitat entsteht durch den
+  Selbstaufruf auf der rechten Seite.
+end note
+
+note bottom of tokenizer
+  Fehler_Positionen (Phase 5):
+  T_BAD -> Position des Zeichens
+  fehlender Operand / ')') -> Position des \n
+  Division durch 0 / neg. Exponent -> Start des
+  rechten Operanden, inf/nan -> Operator
+end note
+@enduml
