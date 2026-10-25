@@ -19,7 +19,7 @@
 #define STUDENT_LASTNAME "bucker"
 #define STUDENT_ID "260ADM047"
 
-
+//---- File I/O ----
 // Reads the entire input file into one heap buffer
 static char *read_whole_file(const char *path, size_t *length_out) {
 
@@ -123,6 +123,74 @@ static int write_file(const char *path, const char *content, size_t length) {
     fwrite(content, 1, length, file);
     fclose(file);
     return 0;
+}
+
+//---- Tokenizer ----
+enum TokenType {
+    TOKEN_NUMBER,
+    TOKEN_PLUS,
+    TOKEN_MINUS,
+    TOKEN_EOL,
+    TOKEN_EOF,
+    TOKEN_INVALID,
+};
+
+struct Token {
+    enum TokenType type;
+    long long value;
+    size_t pos;
+};
+
+struct Tokenizer {
+    const char *buffer;
+    size_t length;
+    size_t position;
+};
+
+static struct Token next_token(struct Tokenizer *t) {
+    //remove whitespace
+    while (t->buffer[t->position] == ' ' || t->buffer[t->position] == '\t') {
+        t->position++;
+    }
+
+    if (t->position >= t->length) {
+        struct Token token = {TOKEN_EOF, 0, t->length + 1};
+        return token;
+    }
+    
+    // One rule for every branch
+    char current = t->buffer[t->position];
+    switch (current) {
+        case '\n': {
+            struct Token token = {TOKEN_EOL, 0, t->position + 1};
+            t->position++;
+            return token;
+        }
+        case '+': {
+            struct Token token = {TOKEN_PLUS, 0, t->position + 1};
+            t->position++;
+            return token;
+        }
+        case '-': {
+            struct Token token = {TOKEN_MINUS, 0, t->position + 1};
+            t->position++;
+            return token;
+        }
+        case '0' ... '9': {
+            size_t start = t->position;
+            long long value = 0;
+            while (t->buffer[t->position] >= '0' && t->buffer[t->position] <= '9') {
+                value = value * 10 + (t->buffer[t->position] - '0');
+                t->position++;
+            }
+            return (struct Token){TOKEN_NUMBER, value, start + 1};
+        }
+        default: {
+            struct Token token = {TOKEN_INVALID, 0, t->position + 1};
+            t->position++;
+            return token;
+        }
+    }
 }
 
 int main(int argc, char **argv) {
