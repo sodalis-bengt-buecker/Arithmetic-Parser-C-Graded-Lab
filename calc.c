@@ -8,6 +8,7 @@
 // VSCode GitHub Copilot auto completer
 // Mistral Medium 3.5 help with Project Planning: https://chat.mistral.ai/work/eb453a14-e422-41b7-b30d-9f30d040b6b6
 // GLM-5.3-Flash created the UML (The Chat is not shareable)
+// further usage down below
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -118,6 +119,8 @@ enum TokenType {
     TOKEN_MINUS,
     TOKEN_MULT,
     TOKEN_DIV,
+    TOKEN_PARENTHESES_OPEN,
+    TOKEN_PARENTHESES_CLOSE,
     TOKEN_EOL,
     TOKEN_EOF,
     TOKEN_INVALID,
@@ -136,7 +139,6 @@ struct Tokenizer {
     size_t position;
     int has_error;
     size_t error_position;
-    size_t operand_start;
     struct Token peek;
     int has_peeked;
 };
@@ -187,6 +189,16 @@ static struct Token next_token(struct Tokenizer *t) {
             t->position++;
             return token;
         }
+        case '(': {
+            struct Token token = {TOKEN_PARENTHESES_OPEN, 0, t->position + 1};
+            t->position++;
+            return token;
+        }
+        case ')': {
+            struct Token token = {TOKEN_PARENTHESES_CLOSE, 0, t->position + 1};
+            t->position++;
+            return token;
+        }
         case '0' ... '9': {
             size_t start = t->position;
             long long value = 0;
@@ -215,13 +227,21 @@ static struct Token peek_token(struct Tokenizer *t) {
 }
 
 //---- Parser ----
+//needed for primary() to call expression() recursively when encountering parentheses
+static long long expression(struct Tokenizer *t, enum TokenType end_token);
 //ERROR postion is the tokens position (1-based) where the first error occurred
 static long long primary(struct Tokenizer *t) {
     struct Token token = next_token(t);
-    t->operand_start = token.pos; //= pos of the first token read by primary() -> for error reporting in division by zero
-    
+   
+    // ( opens a group -> is done in the same recursion -> nesting of any depth works
     if (token.type == TOKEN_NUMBER) {
         return token.value;
+    } else if (token.type == TOKEN_PARENTHESES_OPEN) {
+        long long value = expression(t, TOKEN_PARENTHESES_CLOSE);
+        if (t->has_error) {
+            return 0;
+        }
+        return value;
     } else {
         if (t->has_error == 0) { //first ERROR wins
             t->has_error = 1;
@@ -248,13 +268,16 @@ static long long term(struct Tokenizer *t) {
                 return 0;
             }
         } else if (token.type == TOKEN_DIV) {
+            //divison by zeor is reported at the start of the right operand
+            long long div_with_zero_pos = peek_token(t).pos;
             long long div_with_zero = primary(t);
+
             if (t->has_error) {
                 return 0;
             }
-            if (div_with_zero == 0 && !t->has_error) {
+            if (div_with_zero == 0) {
                 t->has_error = 1;
-                t->error_position = t->operand_start;
+                t->error_position = div_with_zero_pos;
             } else {
                 solution /= div_with_zero;
             }
@@ -264,7 +287,9 @@ static long long term(struct Tokenizer *t) {
     return solution;
 }
 
-static long long expression(struct Tokenizer *t) {
+//handles addition and subtraction
+//leftassociative 
+static long long expression(struct Tokenizer *t, enum TokenType end_token) {
     long long solution = term(t);
 
     if (t->has_error) {
@@ -283,30 +308,33 @@ static long long expression(struct Tokenizer *t) {
             if (t->has_error) {
                 return 0;
             }
-        } else {
-            if (token.type == TOKEN_INVALID) {
-                if (t->has_error == 0) {
-                    t->has_error = 1;
-                    t->error_position = token.pos;
-                }
-            }
-            break;
-        }
+        } 
     }
 
-    struct Token end = next_token(t);
-    if (end.type != TOKEN_EOL && end.type != TOKEN_EOF) {
+    //States which token is allowed to end the expression
+    //- for a "normal" line: TOKEN_EOL
+    //- for a group: TOKEN_PARENTHSES_CLOSE
+    // - for the end of file: TOKEN_EOF
+    struct Token ende = peek_token(t);
+    
+    if (ende.type == end_token || (end_token == TOKEN_EOL && ende.type == TOKEN_EOF)) {
+        next_token(t);
+        return solution;
+    } else {
         if (t->has_error == 0) {
             t->has_error = 1;
-            t->error_position = end.pos;
+            t->error_position = ende.pos;
         }
         return 0;
     }
-    return solution;
 }
 
 //---- Main ----
-//results are collected before writing to the output file to ensure that if any line has an error, only the error is written and no partial results are output
+//results are collected before writing to the output
+//file to ensure that if any line has an error
+//only the error is written and no partial results are output
+// I used AI (VS Code GitHub Copilot and OpenCode GLM-5.3-Flash) to fit the main method to the current state of the file (the different commits), sessions are not shareable
+//- e.g. change var or method names
 int main(int argc, char **argv) {
     if (argc != 4 || strcmp(argv[1], "-o") != 0) {
         fprintf(stderr, "Usage: %s -o <output_dir> <input_file>\n", argv[0]);
@@ -339,7 +367,9 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    struct Tokenizer t = {buffer, length, 0, 0, 0, 0, {0, 0, 0}, 0};
+    struct Tokenizer t = {0};
+    t.buffer = buffer;
+    t.length = length;
 
     size_t capacity = 32;
     size_t count = 0;
@@ -353,7 +383,7 @@ int main(int argc, char **argv) {
     }
 
     while (t.position < t.length) {
-        long long r = expression(&t);
+        long long r = expression(&t, TOKEN_EOL);
         if (t.has_error) {
             break;
         }
