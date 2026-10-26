@@ -116,6 +116,8 @@ enum TokenType {
     TOKEN_NUMBER,
     TOKEN_PLUS,
     TOKEN_MINUS,
+    TOKEN_MULT,
+    TOKEN_DIV,
     TOKEN_EOL,
     TOKEN_EOF,
     TOKEN_INVALID,
@@ -134,10 +136,19 @@ struct Tokenizer {
     size_t position;
     int has_error;
     size_t error_position;
+    size_t operand_start;
+    struct Token peek;
+    int has_peeked;
 };
 
 //Position = buffer index + 1 (1-based position for error reporting)
 static struct Token next_token(struct Tokenizer *t) {
+    
+    if (t->has_peeked) {
+        t->has_peeked = 0;
+        return t->peek;
+    }
+
     //remove whitespace
     while (t->buffer[t->position] == ' ' || t->buffer[t->position] == '\t') {
         t->position++;
@@ -166,6 +177,16 @@ static struct Token next_token(struct Tokenizer *t) {
             t->position++;
             return token;
         }
+        case '*': {
+            struct Token token = {TOKEN_MULT, 0, t->position + 1};
+            t->position++;
+            return token;
+        }
+        case '/': {
+            struct Token token = {TOKEN_DIV, 0, t->position + 1};
+            t->position++;
+            return token;
+        }
         case '0' ... '9': {
             size_t start = t->position;
             long long value = 0;
@@ -183,10 +204,21 @@ static struct Token next_token(struct Tokenizer *t) {
     }
 }
 
+//look at the next token without consuming it
+static struct Token peek_token(struct Tokenizer *t) {
+    if (t->has_peeked) {
+        return t->peek;
+    }
+    t->peek = next_token(t);
+    t->has_peeked = 1;
+    return t->peek;
+}
+
 //---- Parser ----
 //ERROR postion is the tokens position (1-based) where the first error occurred
 static long long primary(struct Tokenizer *t) {
     struct Token token = next_token(t);
+    t->operand_start = token.pos; //= pos of the first token read by primary() -> for error reporting in division by zero
     
     if (token.type == TOKEN_NUMBER) {
         return token.value;
@@ -199,22 +231,55 @@ static long long primary(struct Tokenizer *t) {
     }
 }
 
-static long long expression(struct Tokenizer *t) {
+//handles mult and div
+//runs inside expression() so 3 + 4 * 5 becomes 3 + (4 * 5)
+static long long term(struct Tokenizer *t) {
     long long solution = primary(t);
 
     if (t->has_error) {
         return 0;
     }
 
-    for (;;) {
+    while (peek_token(t).type == TOKEN_MULT || peek_token(t).type == TOKEN_DIV) {
+        struct Token token = next_token(t);
+        if (token.type == TOKEN_MULT) {
+            solution *= primary(t);
+            if (t->has_error) {
+                return 0;
+            }
+        } else if (token.type == TOKEN_DIV) {
+            long long div_with_zero = primary(t);
+            if (t->has_error) {
+                return 0;
+            }
+            if (div_with_zero == 0 && !t->has_error) {
+                t->has_error = 1;
+                t->error_position = t->operand_start;
+            } else {
+                solution /= div_with_zero;
+            }
+        }
+    }
+
+    return solution;
+}
+
+static long long expression(struct Tokenizer *t) {
+    long long solution = term(t);
+
+    if (t->has_error) {
+        return 0;
+    }
+
+    while (peek_token(t).type == TOKEN_PLUS || peek_token(t).type == TOKEN_MINUS) {
         struct Token token = next_token(t);
         if (token.type == TOKEN_PLUS) {
-            solution += primary(t);
+            solution += term(t);
             if (t->has_error) {
                 return 0;
             }
         } else if (token.type == TOKEN_MINUS) {
-            solution -= primary(t);
+            solution -= term(t);
             if (t->has_error) {
                 return 0;
             }
@@ -227,6 +292,15 @@ static long long expression(struct Tokenizer *t) {
             }
             break;
         }
+    }
+
+    struct Token end = next_token(t);
+    if (end.type != TOKEN_EOL && end.type != TOKEN_EOF) {
+        if (t->has_error == 0) {
+            t->has_error = 1;
+            t->error_position = end.pos;
+        }
+        return 0;
     }
     return solution;
 }
@@ -265,7 +339,7 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    struct Tokenizer t = {buffer, length, 0, 0, 0};
+    struct Tokenizer t = {buffer, length, 0, 0, 0, 0, {0, 0, 0}, 0};
 
     size_t capacity = 32;
     size_t count = 0;
