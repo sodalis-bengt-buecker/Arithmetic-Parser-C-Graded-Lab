@@ -111,20 +111,6 @@ static int ensure_output_directory(const char *output_dir) {
     return 0;
 }
 
-// Writes the whole buffer to the file. Returns 0 on success, nonzero on error.
-static int write_file(const char *path, const char *content, size_t length) {
-    FILE *file = fopen(path, "w");
-    
-    if (file == NULL) {
-        fprintf(stderr, "Failed to open file '%s' for writing\n", path);
-        return 1;
-    }
-
-    fwrite(content, 1, length, file);
-    fclose(file);
-    return 0;
-}
-
 //---- Tokenizer ----
 enum TokenType {
     TOKEN_NUMBER,
@@ -141,12 +127,16 @@ struct Token {
     size_t pos;
 };
 
+//Struct instead of global vars so the data flow stays explicit and easier to manage
 struct Tokenizer {
     const char *buffer;
     size_t length;
     size_t position;
+    int has_error;
+    size_t error_position;
 };
 
+//Position = buffer index + 1 (1-based position for error reporting)
 static struct Token next_token(struct Tokenizer *t) {
     //remove whitespace
     while (t->buffer[t->position] == ' ' || t->buffer[t->position] == '\t') {
@@ -194,12 +184,17 @@ static struct Token next_token(struct Tokenizer *t) {
 }
 
 //---- Parser ----
+//ERROR postion is the tokens position (1-based) where the first error occurred
 static long long primary(struct Tokenizer *t) {
     struct Token token = next_token(t);
     
     if (token.type == TOKEN_NUMBER) {
         return token.value;
     } else {
+        if (t->has_error == 0) { //first ERROR wins
+            t->has_error = 1;
+            t->error_position = token.pos;
+        }
         return 0;
     }
 }
@@ -207,19 +202,37 @@ static long long primary(struct Tokenizer *t) {
 static long long expression(struct Tokenizer *t) {
     long long solution = primary(t);
 
+    if (t->has_error) {
+        return 0;
+    }
+
     for (;;) {
         struct Token token = next_token(t);
         if (token.type == TOKEN_PLUS) {
             solution += primary(t);
+            if (t->has_error) {
+                return 0;
+            }
         } else if (token.type == TOKEN_MINUS) {
             solution -= primary(t);
+            if (t->has_error) {
+                return 0;
+            }
         } else {
+            if (token.type == TOKEN_INVALID) {
+                if (t->has_error == 0) {
+                    t->has_error = 1;
+                    t->error_position = token.pos;
+                }
+            }
             break;
         }
     }
     return solution;
 }
 
+//---- Main ----
+//results are collected before writing to the output file to ensure that if any line has an error, only the error is written and no partial results are output
 int main(int argc, char **argv) {
     if (argc != 4 || strcmp(argv[1], "-o") != 0) {
         fprintf(stderr, "Usage: %s -o <output_dir> <input_file>\n", argv[0]);
@@ -244,8 +257,6 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    int yippie = write_file(output_path, buffer, length);
-
     FILE *out = fopen(output_path, "w");
     if (out == NULL) {
         fprintf(stderr, "Failed to open '%s' for writing\n", output_path);
@@ -254,11 +265,50 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    struct Tokenizer t = {buffer, length, 0};
-    while (t.position < t.length) {
-        fprintf(out, "%lld\n", expression(&t));
+    struct Tokenizer t = {buffer, length, 0, 0, 0};
+
+    size_t capacity = 32;
+    size_t count = 0;
+    long long *results = malloc(capacity * sizeof *results);
+    if (results == NULL) {
+        fprintf(stderr, "Out of memory\n");
+        fclose(out);
+        free(buffer);
+        free(output_path);
+        return 1;
     }
+
+    while (t.position < t.length) {
+        long long r = expression(&t);
+        if (t.has_error) {
+            break;
+        }
+        if (count == capacity) {
+            capacity *= 2;
+            long long *grown = realloc(results, capacity * sizeof *results);
+            if (grown == NULL) {
+                fprintf(stderr, "Out of memory\n");
+                free(results);
+                fclose(out);
+                free(buffer);
+                free(output_path);
+                return 1;
+            }
+            results = grown;
+        }
+        results[count++] = r;
+    }
+
+    if (t.has_error) {
+        fprintf(out, "ERROR:%zu\n", t.error_position);
+    } else {
+        for (size_t i = 0; i < count; i++) {
+            fprintf(out, "%lld\n", results[i]);
+        }
+    }
+
     fclose(out);
+    free(results);
 
     free(buffer);
     free(output_path);
