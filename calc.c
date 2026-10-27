@@ -9,6 +9,7 @@
 // Mistral Medium 3.5 help with Project Planning: https://chat.mistral.ai/work/eb453a14-e422-41b7-b30d-9f30d040b6b6
 // GLM-5.3-Flash created the UML (The Chat is not shareable)
 // commit messages where mostly written by VS Code GitHub Copilot
+// Opus-5.5 in the end I ran a prompt "Checke mein fertiges [calc.c](calc.c) gegen die Anforderungen (einene Ordner darüber). Erstelle hier im chat eine übersicht, was ich noch fixen muss. Fasse das Dokument selber nicht an." to check my calc.c against the course requirements, the changes resulting by that are in the last commit and depicted wiht "AI Refactor" in the code
 // further usage down below
 
 #include <stdio.h>
@@ -108,7 +109,11 @@ static char *read_whole_file(const char *path, size_t *length_out) {
         return NULL;
     }
 
-    // Start with a small buffer and grow as needed (So files of any size can be read)
+    // AI Refactor:
+    // Large files: the file is read only once into one buffer. When the buffer is
+    // full, its size is doubled, so even a file of many MB needs only a few reallocs.
+    // Later the parser walks this buffer with an index and never copies lines.
+
     size_t max_capacity = 32;
     size_t used_capacity = 0;
     char *buffer = malloc(max_capacity);
@@ -290,7 +295,14 @@ static int process_file(const char *input_path, const char *out_path) {
         }
     }
 
-    fclose(out);
+    // AI Refactor: fclose writes the rest of the stdio buffer, so a full disk only shows up here
+    if (fclose(out) != 0) {
+        fprintf(stderr, "Failed to write '%s'\n", output_path);
+        free(results);
+        free(buffer);
+        free(output_path);
+        return 1;
+    }
     free(results);
 
     free(buffer);
@@ -416,31 +428,34 @@ static struct Token next_token(struct Tokenizer *t) {
             return token;
         }
         case '0' ... '9': {
+            // AI refactor: for this block, prompt: "okay, implementiere deine lösung und markiere die änderungen, so wie ich es gemacht habe"
+            //- my own digit arithmetic (value * 10 + digit, fraction / scale) was replaced by strtod/strtoll
+            //- reason: it overflowed after 18 decimals and rounded twice, so e.g. "8.726 - 8" printed a wrong last digit
             size_t start = t->position;
-            long long value = 0;
+            // the loops only find where the number ends, the conversion is done below
             while (t->buffer[t->position] >= '0' && t->buffer[t->position] <= '9') {
-                value = value * 10 + (t->buffer[t->position] - '0');
                 t->position++;
             }
 
-            struct Token token = {TOKEN_NUMBER, value, start + 1, 0.0};
-            
+            struct Token token;
+
             // a fraction only starts when "." is directly followed by a digit:
             // ".5", "5." and "1.5e3" therefore fail automatically as an invalid character
             if (t->position < t->length && t->buffer[t->position] == '.' && t->buffer[t->position + 1] >= '0' && t->buffer[t->position + 1] <= '9') {
                 t->position++; // skip the dot
-                long long fraction = 0;
-                long long scale = 1;
-
                 while (t->buffer[t->position] >= '0' && t->buffer[t->position] <= '9') {
-                    fraction = fraction * 10 + (t->buffer[t->position] - '0');
-                    scale *= 10;
                     t->position++;
                 }
-                token = (struct Token){TOKEN_FLOAT, 0, start + 1, (double)value + (double)fraction / (double)scale};
+                // strtod (stdlib) turns the text into the nearest double in one step, so it rounds only once.
+                // For "1.5e3" it would also read "e3", but the 'e' is the next token and an
+                // invalid character, so that line is an error anyway.
+                double number = strtod(t->buffer + start, NULL);
+                token = (struct Token){TOKEN_FLOAT, 0, start + 1, number};
 
             } else {
-                token = (struct Token){TOKEN_NUMBER, value, start + 1, 0.0};
+                // strtoll (stdlib) turns the digits into a long long (base 10)
+                long long number = strtoll(t->buffer + start, NULL, 10);
+                token = (struct Token){TOKEN_NUMBER, number, start + 1, 0.0};
             }
 
 
@@ -580,7 +595,7 @@ static struct Value power(struct Tokenizer *t) {
     if (base.is_float || exponent.is_float) {
         struct Value result = make_float(pow(as_double(base), as_double(exponent)));
         if (isinf(result.float_value) || isnan(result.float_value)) {
-            // both operands are valid ints, only their combination is not
+            // both operands are valid numbers, only their combination is not
             // therefore the ERROR is reported at the operator
             t->has_error = 1;
             t->error_position = operator_token.pos;
@@ -588,9 +603,30 @@ static struct Value power(struct Tokenizer *t) {
         }
         base = result;
     } else {
+
+        // AI Refactor: suggested handling base 0, 1, -1 separately
+        // A huge exponent is only possible for base 0, 1 and -1: every other base
+        // would overflow long long after at most 63 steps (tests never overflow).
+        // These three bases are handled directly, so the loop always stays short.
         long long result = 1;
-        for (long long i = 0; i < exponent.int_value; i++) {
-            result *= base.int_value;
+        if (base.int_value == 0) {
+            if (exponent.int_value == 0) {
+                result = 1;
+            } else {
+                result = 0;
+            }
+        } else if (base.int_value == 1) {
+            result = 1;
+        } else if (base.int_value == -1) {
+            if (exponent.int_value % 2 == 0) {
+                result = 1;
+            } else {
+                result = -1;
+            }
+        } else {
+            for (long long i = 0; i < exponent.int_value; i++) {
+                result *= base.int_value;
+            }
         }
         base = make_integer(result);
     }
@@ -682,6 +718,10 @@ static struct Value expression(struct Tokenizer *t, enum TokenType end_token) {
 int main(int arg_count, char **arg_value) {
     const char *dir_argument = NULL;
     const char *out_argument = NULL;
+    // AI Refactor
+    //memory that main allocates itself
+    char *dir_copy = NULL;
+    char *default_out = NULL;
     const char *input = NULL;
 
     for (int i = 1; i < arg_count; i++) {
@@ -745,6 +785,9 @@ int main(int arg_count, char **arg_value) {
                     return 1;
                 }
 
+                // AI Refactor: store a copy of the directory path to free later
+                dir_copy = copy;
+
                 strncpy(copy, dir_argument, copy_len);
                 copy[copy_len] = '\0';
                 dir_argument = copy;
@@ -759,17 +802,36 @@ int main(int arg_count, char **arg_value) {
         char *buff = malloc(length);
         if (buff == NULL) {
             fprintf(stderr, "Memory allocation failed\n");
+            
+            //AI Refactor: free any memory allocated for the directory copy before returning
+            if (dir_copy != NULL) {
+                free(dir_copy);
+            }
+
             return 1;
         }
+
+        // AI Refactor: store the default output buffer to free later
+        default_out = buff;
 
         snprintf(buff, length, "%.*s_%s_%s", (int)base_len, base, STUDENT_NAME, STUDENT_ID);
         out_argument = buff;
     }
 
 
+    // AI Refactor: suggested freeing main's own allocations
+    int result;
     if (dir_argument != NULL) {
-        return process_directory(dir_argument, out_argument);
+        result = process_directory(dir_argument, out_argument);
     } else {
-        return process_file(input, out_argument);
+        result = process_file(input, out_argument);
     }
+
+    if (dir_copy != NULL) {
+        free(dir_copy);
+    }
+    if (default_out != NULL) {
+        free(default_out);
+    }
+    return result;
 }
