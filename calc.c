@@ -10,7 +10,8 @@
 // GLM-5.3-Flash created the UML (The Chat is not shareable)
 // commit messages where mostly written by VS Code GitHub Copilot
 // Opus-5.5 in the end I ran a prompt "Checke mein fertiges [calc.c](calc.c) gegen die Anforderungen (einene Ordner darüber). Erstelle hier im chat eine übersicht, was ich noch fixen muss. Fasse das Dokument selber nicht an." to check my calc.c against the course requirements, the changes resulting by that are in the last commit and depicted wiht "AI Refactor" in the code
-// further usage down below
+// GLM-5.3-Flash was used to enhance my comments, and fix my english
+//further usage down below
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -364,7 +365,11 @@ static const char *file_base_name(const char *path, size_t *length_out) {
 }
 
 //---- Tokenizer ----
-//Position = buffer index + 1 (1-based position for error reporting)
+// The whole file is in one buffer and t->position is the index into it. The index is
+// never reset per line, so every '\n' and every character of comment lines is counted
+// automatically. A token stores the index of its first character + 1, because
+// positions are 1-based. The end of the file gets length + 1: that is the position
+// for a missing operand or ')' when the last line has no '\n'.
 static struct Token next_token(struct Tokenizer *t) {
     
     if (t->has_peeked) {
@@ -462,6 +467,8 @@ static struct Token next_token(struct Tokenizer *t) {
             return token;
         }
         default: {
+            // an invalid character becomes its own token with its own position.
+            // The parser reports it as soon as it reaches this token, so the error is at that character.
             struct Token token = {TOKEN_INVALID, 0, t->position + 1, 0.0};
             t->position++;
             return token;
@@ -480,7 +487,8 @@ static struct Token peek_token(struct Tokenizer *t) {
 }
 
 //---- Parser ----
-//ERROR postion is the tokens position (1-based) where the first error occurred
+// only the first error is stored (has_error). Every function returns as soon
+// as it is set, so a later error can never overwrite the position of the first one.
 static struct Value primary(struct Tokenizer *t) {
     struct Token token = next_token(t);
    
@@ -496,6 +504,10 @@ static struct Value primary(struct Tokenizer *t) {
     } else if (token.type == TOKEN_FLOAT) {
         return make_float(token.float_value);
     } else {
+        // primary() is the only place where a number or '(' is required.
+        // The token found here is where parsing cannot continue, so its position is the error:
+        // a second operator (7 + * 3 -> at the '*'), an invalid character, ')' in "()",
+        // or the '\n' / end of file for a missing operand (3 * -> at the '\n')
         if (t->has_error == 0) { //first ERROR wins
             t->has_error = 1;
             t->error_position = token.pos;
@@ -515,6 +527,8 @@ static struct Value term(struct Tokenizer *t) {
 
     while (peek_token(t).type == TOKEN_MULT || peek_token(t).type == TOKEN_DIV) {
         struct Token token = next_token(t);
+        // remember where the right operand starts before parsing it,
+        // afterwards the tokenizer is already behind it (needed for division by zero)
         long long right_side_pos = peek_token(t).pos;
         struct Value right_side = power(t);
 
@@ -540,7 +554,8 @@ static struct Value term(struct Tokenizer *t) {
             }
 
         } else if (token.type == TOKEN_DIV) {
-            //division by zero is reported at the start of the right operand
+            // division by zero is reported at the start of the right operand,
+            // because the operand is the wrong part, not the '/'.
             //one check covers int 0 and float 0.0
             if (as_double(right_side) == 0.0) {
                 t->has_error = 1;
@@ -567,6 +582,10 @@ static struct Value term(struct Tokenizer *t) {
 
 //handles power
 //rightassociative a ** b ** c is parsed as a ** (b ** c)
+// why "**" is right-associative
+// For its right side power() calls itself instead of using a loop like term() and
+// expression(). So in 2 ** 3 ** 2 the inner call computes 3 ** 2 = 9 first, then 2 ** 9 = 512.
+// term() calls power() for its operands, so "**" binds tighter than "*" and "/".
 static struct Value power(struct Tokenizer *t) {
     struct Value base = primary(t);
     if (t->has_error) {
@@ -579,14 +598,16 @@ static struct Value power(struct Tokenizer *t) {
 
     struct Token operator_token = next_token(t);       // the "**" itself
     long long exponent_start_pos = peek_token(t).pos;  // start of the exponent
-    struct Value exponent = power(t);                  // rightassociativity
+    struct Value exponent = power(t);                  // calls itself -> right side is grouped first
 
     if (t->has_error) {
         return make_integer(0);
     }
 
     if (!base.is_float && !exponent.is_float && exponent.int_value < 0) {
-        // negative exponent is only an error for int ** int,
+        // int ** negative int is not an integer -> error. It is reported at the
+        // start of the exponent, because the exponent is the wrong part.
+        // With a float on either side pow() handles it (0.5 ** (0 - 1) = 2)
         t->has_error = 1;
         t->error_position = exponent_start_pos;
         return make_integer(0);
@@ -604,7 +625,7 @@ static struct Value power(struct Tokenizer *t) {
         base = result;
     } else {
 
-        // AI Refactor: suggested handling base 0, 1, -1 separately
+        //AI Refactor: suggested handling base 0, 1, -1 separately
         // A huge exponent is only possible for base 0, 1 and -1: every other base
         // would overflow long long after at most 63 steps (tests never overflow).
         // These three bases are handled directly, so the loop always stays short.
@@ -695,6 +716,9 @@ static struct Value expression(struct Tokenizer *t, enum TokenType end_token) {
     //- for a "normal" line: TOKEN_EOL
     //- for a group: TOKEN_PARENTHSES_CLOSE
     // - for the end of file: TOKEN_EOF
+    // any other token means the expression cannot continue here, so its
+    // position is the error: an extra ')' on a line (at the ')'), a missing ')' (at the
+    // '\n' or end of file), or two numbers in a row (at the second number)
     struct Token end = peek_token(t);
     
     if (end.type == end_token || (end_token == TOKEN_EOL && end.type == TOKEN_EOF)) {
