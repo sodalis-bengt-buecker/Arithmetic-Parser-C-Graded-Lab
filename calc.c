@@ -17,6 +17,7 @@
 #include <sys/stat.h>
 #include <errno.h>
 #include <dirent.h>
+#include <math.h>
 
 #define STUDENT_NAME "bengt"
 #define STUDENT_LASTNAME "bucker"
@@ -32,6 +33,7 @@ enum TokenType {
     TOKEN_PARENTHESES_OPEN,
     TOKEN_PARENTHESES_CLOSE,
     TOKEN_POWER,
+    TOKEN_FLOAT,
     TOKEN_EOL,
     TOKEN_EOF,
     TOKEN_INVALID,
@@ -41,6 +43,7 @@ struct Token {
     enum TokenType type;
     long long value;
     size_t pos;
+    double float_value;
 };
 
 //Struct instead of global vars so the data flow stays explicit and easier to manage
@@ -54,13 +57,46 @@ struct Tokenizer {
     int has_peeked;
 };
 
+struct Value {
+    int is_float;
+    long long int_value;
+    double float_value;
+};
+
+//--- Constructors for Value struct ---
+static struct Value make_integer(long long value) {
+    struct Value v;
+    v.is_float = 0;
+    v.int_value = value;
+    v.float_value = 0.0;
+    return v;
+}
+
+static struct Value make_float(double value) {
+    struct Value v;
+    v.is_float = 1;
+    v.int_value = 0;
+    v.float_value = value;
+    return v;
+}
+
+//whole calc runs as double
+//if both int -> stays int
+static double as_double(struct Value v) {
+    if (v.is_float) {
+        return v.float_value;
+    } else {
+        return (double)v.int_value;
+    }
+}
+
 //---- Prototypes ----
 //Declarations for functions that are used before they are defined further down
 static const char *file_base_name(const char *path, size_t *length_out);
 //needed for term() to call power()
-static long long power(struct Tokenizer *t);
+static struct Value power(struct Tokenizer *t);
 //needed for primary() to call expression() recursively when encountering parentheses
-static long long expression(struct Tokenizer *t, enum TokenType end_token);
+static struct Value expression(struct Tokenizer *t, enum TokenType end_token);
 
 //---- File I/O ----
 //used pseudo code by GLM-5.3-Flash
@@ -185,7 +221,8 @@ static int process_file(const char *input_path, const char *out_path) {
 
     size_t capacity = 32;
     size_t count = 0;
-    long long *results = malloc(capacity * sizeof *results);
+    struct Value *results = malloc(capacity * sizeof *results);
+
     if (results == NULL) {
         fprintf(stderr, "Out of memory\n");
         fclose(out);
@@ -218,13 +255,13 @@ static int process_file(const char *input_path, const char *out_path) {
             continue;
         }
 
-        long long r = expression(&t, TOKEN_EOL);
+        struct Value r = expression(&t, TOKEN_EOL);
         if (t.has_error) {
             break;
         }
         if (count == capacity) {
             capacity *= 2;
-            long long *grown = realloc(results, capacity * sizeof *results);
+            struct Value *grown = realloc(results, capacity * sizeof *results);
             if (grown == NULL) {
                 fprintf(stderr, "Out of memory\n");
                 free(results);
@@ -242,7 +279,14 @@ static int process_file(const char *input_path, const char *out_path) {
         fprintf(out, "ERROR:%zu\n", t.error_position);
     } else {
         for (size_t i = 0; i < count; i++) {
-            fprintf(out, "%lld\n", results[i]);
+            
+            //15 digits, trailing zeros stripped
+            if (results[i].is_float) {
+                fprintf(out, "%.15g\n", results[i].float_value);
+            } else {
+                fprintf(out, "%lld\n", results[i].int_value);
+            }
+
         }
     }
 
@@ -322,7 +366,7 @@ static struct Token next_token(struct Tokenizer *t) {
     }
 
     if (t->position >= t->length) {
-        struct Token token = {TOKEN_EOF, 0, t->length + 1};
+        struct Token token = {TOKEN_EOF, 0, t->length + 1, 0.0};
         return token;
     }
     
@@ -330,17 +374,17 @@ static struct Token next_token(struct Tokenizer *t) {
     char current = t->buffer[t->position];
     switch (current) {
         case '\n': {
-            struct Token token = {TOKEN_EOL, 0, t->position + 1};
+            struct Token token = {TOKEN_EOL, 0, t->position + 1, 0.0};
             t->position++;
             return token;
         }
         case '+': {
-            struct Token token = {TOKEN_PLUS, 0, t->position + 1};
+            struct Token token = {TOKEN_PLUS, 0, t->position + 1, 0.0};
             t->position++;
             return token;
         }
         case '-': {
-            struct Token token = {TOKEN_MINUS, 0, t->position + 1};
+            struct Token token = {TOKEN_MINUS, 0, t->position + 1, 0.0};
             t->position++;
             return token;
         }
@@ -348,26 +392,26 @@ static struct Token next_token(struct Tokenizer *t) {
             //check for "**"
             //because of -1, the next character is always readable
             if (t->buffer[t->position + 1] == '*') {
-                struct Token token = {TOKEN_POWER, 0, t->position + 1};
+                struct Token token = {TOKEN_POWER, 0, t->position + 1, 0.0};
                 t->position += 2;
                 return token;
             }
-            struct Token token = {TOKEN_MULT, 0, t->position + 1};
+            struct Token token = {TOKEN_MULT, 0, t->position + 1, 0.0};
             t->position++;
             return token;
         }
         case '/': {
-            struct Token token = {TOKEN_DIV, 0, t->position + 1};
+            struct Token token = {TOKEN_DIV, 0, t->position + 1, 0.0};
             t->position++;
             return token;
         }
         case '(': {
-            struct Token token = {TOKEN_PARENTHESES_OPEN, 0, t->position + 1};
+            struct Token token = {TOKEN_PARENTHESES_OPEN, 0, t->position + 1, 0.0};
             t->position++;
             return token;
         }
         case ')': {
-            struct Token token = {TOKEN_PARENTHESES_CLOSE, 0, t->position + 1};
+            struct Token token = {TOKEN_PARENTHESES_CLOSE, 0, t->position + 1, 0.0};
             t->position++;
             return token;
         }
@@ -378,10 +422,32 @@ static struct Token next_token(struct Tokenizer *t) {
                 value = value * 10 + (t->buffer[t->position] - '0');
                 t->position++;
             }
-            return (struct Token){TOKEN_NUMBER, value, start + 1};
+
+            struct Token token = {TOKEN_NUMBER, value, start + 1, 0.0};
+            
+            // a fraction only starts when "." is directly followed by a digit:
+            // ".5", "5." and "1.5e3" therefore fail automatically as an invalid character
+            if (t->position < t->length && t->buffer[t->position] == '.' && t->buffer[t->position + 1] >= '0' && t->buffer[t->position + 1] <= '9') {
+                t->position++; // skip the dot
+                long long fraction = 0;
+                long long scale = 1;
+
+                while (t->buffer[t->position] >= '0' && t->buffer[t->position] <= '9') {
+                    fraction = fraction * 10 + (t->buffer[t->position] - '0');
+                    scale *= 10;
+                    t->position++;
+                }
+                token = (struct Token){TOKEN_FLOAT, 0, start + 1, (double)value + (double)fraction / (double)scale};
+
+            } else {
+                token = (struct Token){TOKEN_NUMBER, value, start + 1, 0.0};
+            }
+
+
+            return token;
         }
         default: {
-            struct Token token = {TOKEN_INVALID, 0, t->position + 1};
+            struct Token token = {TOKEN_INVALID, 0, t->position + 1, 0.0};
             t->position++;
             return token;
         }
@@ -400,56 +466,83 @@ static struct Token peek_token(struct Tokenizer *t) {
 
 //---- Parser ----
 //ERROR postion is the tokens position (1-based) where the first error occurred
-static long long primary(struct Tokenizer *t) {
+static struct Value primary(struct Tokenizer *t) {
     struct Token token = next_token(t);
    
     // ( opens a group -> is done in the same recursion -> nesting of any depth works
     if (token.type == TOKEN_NUMBER) {
-        return token.value;
+        return make_integer(token.value);
     } else if (token.type == TOKEN_PARENTHESES_OPEN) {
-        long long value = expression(t, TOKEN_PARENTHESES_CLOSE);
+        struct Value value = expression(t, TOKEN_PARENTHESES_CLOSE);
         if (t->has_error) {
-            return 0;
+            return make_integer(0);
         }
         return value;
+    } else if (token.type == TOKEN_FLOAT) {
+        return make_float(token.float_value);
     } else {
         if (t->has_error == 0) { //first ERROR wins
             t->has_error = 1;
             t->error_position = token.pos;
         }
-        return 0;
+        return make_integer(0);
     }
 }
 
 //handles mult and div
 //runs inside expression() so 3 + 4 * 5 becomes 3 + (4 * 5)
-static long long term(struct Tokenizer *t) {
-    long long solution = power(t);
+static struct Value term(struct Tokenizer *t) {
+    struct Value solution = power(t);
 
     if (t->has_error) {
-        return 0;
+        return make_integer(0);
     }
 
     while (peek_token(t).type == TOKEN_MULT || peek_token(t).type == TOKEN_DIV) {
         struct Token token = next_token(t);
-        if (token.type == TOKEN_MULT) {
-            solution *= power(t);
-            if (t->has_error) {
-                return 0;
-            }
-        } else if (token.type == TOKEN_DIV) {
-            //divison by zeor is reported at the start of the right operand
-            long long div_with_zero_pos = peek_token(t).pos;
-            long long div_with_zero = power(t);
+        long long right_side_pos = peek_token(t).pos;
+        struct Value right_side = power(t);
 
-            if (t->has_error) {
-                return 0;
-            }
-            if (div_with_zero == 0) {
-                t->has_error = 1;
-                t->error_position = div_with_zero_pos;
+        if (t->has_error) {
+                return make_integer(0);
+        }
+
+        if (token.type == TOKEN_MULT) {
+
+            if (solution.is_float || right_side.is_float) {
+                // same rule as in power(): both operands are valid, only their
+                // combination overflows -> error at the operator
+                struct Value temp = make_float(as_double(solution) * as_double(right_side));
+                
+                if (isinf(temp.float_value) || isnan(temp.float_value)) {
+                    t->has_error = 1;
+                    t->error_position = token.pos;
+                }
+                solution = temp;
             } else {
-                solution /= div_with_zero;
+                // both operands are ints: the result stays a long long
+                solution = make_integer(solution.int_value * right_side.int_value);
+            }
+
+        } else if (token.type == TOKEN_DIV) {
+            //division by zero is reported at the start of the right operand
+            //one check covers int 0 and float 0.0
+            if (as_double(right_side) == 0.0) {
+                t->has_error = 1;
+                t->error_position = right_side_pos;
+                return make_integer(0);
+            } else if (solution.is_float || right_side.is_float) {
+                // same rule as in power(): both operands are valid, only their
+                // combination overflows -> error at the operator
+                struct Value temp = make_float(as_double(solution) / as_double(right_side));
+                if (isinf(temp.float_value) || isnan(temp.float_value)) {
+                    t->has_error = 1;
+                    t->error_position = token.pos;
+                }
+                solution = temp;
+            } else {
+                // both operands are ints: the result stays a long long
+                solution = make_integer(solution.int_value / right_side.int_value);
             }
         }
     }
@@ -459,76 +552,124 @@ static long long term(struct Tokenizer *t) {
 
 //handles power
 //rightassociative a ** b ** c is parsed as a ** (b ** c)
-static long long power(struct Tokenizer *t) {
-    long long value = primary(t);
+static struct Value power(struct Tokenizer *t) {
+    struct Value base = primary(t);
     if (t->has_error) {
-        return 0;
+        return make_integer(0);
     }
 
-    if (peek_token(t).type == TOKEN_POWER) {
-        next_token(t);
-        long long pos = peek_token(t).pos;
-        long long exponent = power(t);
+    if (peek_token(t).type != TOKEN_POWER) {
+        return base;
+    }
 
-        if (t->has_error) {
-            return 0;
-        }
+    struct Token operator_token = next_token(t);       // the "**" itself
+    long long exponent_start_pos = peek_token(t).pos;  // start of the exponent
+    struct Value exponent = power(t);                  // rightassociativity
 
-        if (exponent < 0) {
+    if (t->has_error) {
+        return make_integer(0);
+    }
+
+    if (!base.is_float && !exponent.is_float && exponent.int_value < 0) {
+        // negative exponent is only an error for int ** int,
+        t->has_error = 1;
+        t->error_position = exponent_start_pos;
+        return make_integer(0);
+    }
+
+    if (base.is_float || exponent.is_float) {
+        struct Value result = make_float(pow(as_double(base), as_double(exponent)));
+        if (isinf(result.float_value) || isnan(result.float_value)) {
+            // both operands are valid ints, only their combination is not
+            // therefore the ERROR is reported at the operator
             t->has_error = 1;
-            t->error_position = pos;
-            return 0;
-        } else {
-            long long result = 1;
-            for (long long i = 0; i < exponent; i++) {
-                result *= value;
-            }
-            value = result;
+            t->error_position = operator_token.pos;
+            return make_integer(0);
         }
+        base = result;
+    } else {
+        long long result = 1;
+        for (long long i = 0; i < exponent.int_value; i++) {
+            result *= base.int_value;
+        }
+        base = make_integer(result);
     }
 
-    return value;
+    return base;
 }
 
 //handles addition and subtraction
 //leftassociative 
-static long long expression(struct Tokenizer *t, enum TokenType end_token) {
-    long long solution = term(t);
+static struct Value expression(struct Tokenizer *t, enum TokenType end_token) {
+    struct Value solution = term(t);
 
     if (t->has_error) {
-        return 0;
+        return make_integer(0);
     }
 
     while (peek_token(t).type == TOKEN_PLUS || peek_token(t).type == TOKEN_MINUS) {
         struct Token token = next_token(t);
+        struct Value right_side = term(t);
+
+        if (t->has_error) {
+            return make_integer(0);
+        }
+
         if (token.type == TOKEN_PLUS) {
-            solution += term(t);
+            if (solution.is_float || right_side.is_float) {
+                // same rule as in power(): both operands are valid, only their
+                // combination overflows -> error at the operator
+                struct Value temp = make_float(as_double(solution) + as_double(right_side));
+                
+                if (isinf(temp.float_value) || isnan(temp.float_value)) {
+                    t->has_error = 1;
+                    t->error_position = token.pos;
+                }
+                solution = temp;
+            } else {
+                // both operands are ints: the result stays a long long
+                solution = make_integer(solution.int_value + right_side.int_value);
+            }
+
             if (t->has_error) {
-                return 0;
+                return make_integer(0);
             }
         } else if (token.type == TOKEN_MINUS) {
-            solution -= term(t);
-            if (t->has_error) {
-                return 0;
+            if (solution.is_float || right_side.is_float) {
+                // same rule as in power(): both operands are valid, only their
+                // combination overflows -> error at the operator
+                struct Value temp = make_float(as_double(solution) - as_double(right_side));
+                
+                if (isinf(temp.float_value) || isnan(temp.float_value)) {
+                    t->has_error = 1;
+                    t->error_position = token.pos;
+                }
+                solution = temp;
+            } else {
+                // both operands are ints: the result stays a long long
+                solution = make_integer(solution.int_value - right_side.int_value);
             }
-        } 
+            if (t->has_error) {
+                return make_integer(0);
+            }
+        }
     }
 
     //States which token is allowed to end the expression
     //- for a "normal" line: TOKEN_EOL
     //- for a group: TOKEN_PARENTHSES_CLOSE
     // - for the end of file: TOKEN_EOF
-    struct Token ende = peek_token(t);
+    struct Token end = peek_token(t);
     
-    if (ende.type == end_token || (end_token == TOKEN_EOL && ende.type == TOKEN_EOF)) {
+    if (end.type == end_token || (end_token == TOKEN_EOL && end.type == TOKEN_EOF)) {
         next_token(t);
         return solution;
     } else {
         if (t->has_error == 0) {
             t->has_error = 1;
-            t->error_position = ende.pos;
+            t->error_position = end.pos;
         }
-        return 0;
+        return make_integer(0);
     }
 }
 
